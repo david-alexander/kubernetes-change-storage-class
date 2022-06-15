@@ -70,9 +70,14 @@ async function main()
             context: cmd.option({ type: cmd.string, long: 'context', description: 'The name of the kubeconfig context to use.' }),
             namespaceName: cmd.option({ type: cmd.string, short: 'n', long: 'namespace', description: 'The namespace containing the PVC to convert.' }),
             newStorageClassName: cmd.option({ type: cmd.string, long: 'to-storage-class', description: 'The name of the new storage class for the PVC.' }),
+            newPVCName: cmd.option({ type: cmd.string, long: 'new-name', description: 'Also rename the PVC to the specified name.', defaultValue: () => '' }),
+            newPVCNamespace: cmd.option({ type: cmd.string, long: 'new-namespace', description: 'Also move the PVC to the specified namespace.', defaultValue: () => '' }),
             pvcName: cmd.positional({ type: cmd.string, displayName: 'pvc', description: 'The name of the PVC to convert.' }),
         },
-        handler: async ({ context, namespaceName, newStorageClassName, pvcName }) => {
+        handler: async ({ context, namespaceName, newStorageClassName, pvcName, newPVCName, newPVCNamespace }) => {
+            newPVCName ||= pvcName;
+            newPVCNamespace ||= namespaceName;
+
             const kc = new k8s.KubeConfig();
             kc.loadFromDefault();
             kc.setCurrentContext(context);
@@ -143,12 +148,12 @@ async function main()
 
                         return true;
                     } },
-                    { description: `Create a new PVC, identical to the old one, except for the storage class, which will be changed to ${newStorageClassName.blue}. This will cause a new PV to be provisioned by the ${newStorageClassName.blue} storage provider.`, run: async () => {
-                        await coreAPI.createNamespacedPersistentVolumeClaim(pvc.metadata?.namespace!, {
+                    { description: `Create a new PVC${(newPVCName != pvcName) ? ` named ${newPVCName.blue}` : ``}${(newPVCNamespace != namespaceName) ? ` in namespace ${newPVCNamespace.blue}` : ``}, with a storage class of ${newStorageClassName.blue}. This will cause a new PV to be provisioned by the ${newStorageClassName.blue} storage provider.`, run: async () => {
+                        await coreAPI.createNamespacedPersistentVolumeClaim(newPVCNamespace, {
                             ...pvc,
                             metadata: {
-                                namespace: pvc.metadata?.namespace,
-                                name: pvc.metadata?.name,
+                                namespace: newPVCNamespace,
+                                name: newPVCName,
                                 labels: pvc.metadata?.labels,
                                 annotations: Object.fromEntries(Object.entries(pvc.metadata?.annotations!).filter(([k, v]) => !k.startsWith('pv.kubernetes.io/')))
                             },
@@ -174,7 +179,7 @@ async function main()
                             }
                         });
 
-                        await coreAPI.createNamespacedPersistentVolumeClaim(pvc.metadata?.namespace!, {
+                        await coreAPI.createNamespacedPersistentVolumeClaim(newPVCNamespace, {
                             metadata: {
                                 name: `csc-${runID}-old-data`
                             },
@@ -189,7 +194,7 @@ async function main()
                         return true;
                     } },
                     { description: `Create a Job to copy the data. This Job's Pod will mount both the old PV and the new one.`, run: async () => {
-                        await batchAPI.createNamespacedJob(pvc!.metadata?.namespace!, {
+                        await batchAPI.createNamespacedJob(newPVCNamespace, {
                             metadata: {
                                 name: `csc-${runID}-copy-data`
                             },
@@ -211,7 +216,7 @@ async function main()
                                         ],
                                         volumes: [
                                             { name: "old", persistentVolumeClaim: { claimName: `csc-${runID}-old-data` } },
-                                            { name: "new", persistentVolumeClaim: { claimName: pvc!.metadata?.name! } },
+                                            { name: "new", persistentVolumeClaim: { claimName: newPVCName } },
                                         ]
                                     }
                                 }
@@ -222,7 +227,7 @@ async function main()
 
                         while (true)
                         {
-                            let jobStatus = await batchAPI.readNamespacedJobStatus(`csc-${runID}-copy-data`, pvc!.metadata?.namespace!);
+                            let jobStatus = await batchAPI.readNamespacedJobStatus(`csc-${runID}-copy-data`, newPVCNamespace);
                             
                             if ((jobStatus.body.status?.failed || 0) > 0)
                             {
@@ -246,7 +251,7 @@ async function main()
                         return succeeded;
                     } },
                     { description: `Delete the temporary PVC. Note that we do not delete the old PV - you can do this manually after you have checked that your data is intact in the new PV.`, run: async () => {
-                        await coreAPI.deleteNamespacedPersistentVolumeClaim(`csc-${runID}-old-data`, pvc!.metadata?.namespace!);
+                        await coreAPI.deleteNamespacedPersistentVolumeClaim(`csc-${runID}-old-data`, newPVCNamespace);
                         return true;
                     } }
                 ];
